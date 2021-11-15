@@ -104,6 +104,13 @@ template("embedder_source_set") {
       deps += [ "//flutter/shell/platform/darwin/graphics" ]
     }
 
+    if (embedder_enable_vulkan) {
+      sources += [
+        "embedder_surface_vulkan.h",
+        "embedder_surface_vulkan.cc",
+      ]
+    }
+
     public_deps = [ ":embedder_headers" ]
 
     public_configs += [

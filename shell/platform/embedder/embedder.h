@@ -76,6 +76,7 @@ typedef enum {
   /// iOS version >= 10.0 (device), 13.0 (simulator)
   /// macOS version >= 10.14
   kMetal,
+  kVulkan,
 } FlutterRendererType;
 
 /// Additional accessibility features that may be enabled by the platform.
@@ -552,11 +553,53 @@ typedef struct {
 } FlutterSoftwareRendererConfig;
 
 typedef struct {
+  /// The size of this struct. Must be sizeof(FlutterMetalTexture).
+  size_t struct_size;
+
+  // TO DO: What do we need?
+  uintptr_t handle;
+
+  /// The callback invoked by the engine when it no longer needs this backing
+  /// store.
+  VoidCallback destruction_callback;
+} FlutterVulkanTexture;
+
+typedef FlutterVulkanTexture (*FlutterVulkanTextureCallback)(
+    void* /* user data */,
+    const FlutterFrameInfo* /* frame info */);
+
+typedef bool (*FlutterVulkanPresentCallback)(
+    void* /* user data */,
+    const FlutterVulkanTexture* /* texture */);
+
+typedef struct {
+  /// The size of this struct. Must be sizeof(FlutterVulkanRendererConfig).
+  size_t struct_size;
+
+  // Vulkan Device / Instance
+  uintptr_t instance;
+  uintptr_t physicalDevice;
+  uintptr_t logicalDevice;
+  uintptr_t graphicsQueue;
+  uint32_t graphicsQueueIndex;
+
+  // Do we need to provide a command buffer / queue ?
+
+  // Callback to request next swapchain image
+  FlutterVulkanTextureCallback acquire_next_drawable_callback;
+
+  // Callback to notify that command buffer / image have been filled up
+  FlutterVulkanPresentCallback present_drawable_callback;
+
+} FlutterVulkanRendererConfig;
+
+typedef struct {
   FlutterRendererType type;
   union {
     FlutterOpenGLRendererConfig open_gl;
     FlutterSoftwareRendererConfig software;
     FlutterMetalRendererConfig metal;
+    FlutterVulkanRendererConfig vulkan;
   };
 } FlutterRendererConfig;
 
@@ -989,6 +1032,23 @@ typedef struct {
   };
 } FlutterMetalBackingStore;
 
+typedef struct {
+  /// The size of this struct. Must be sizeof(FlutterVulkanBackingStore).
+  size_t struct_size;
+
+  // VkImage handle
+  void* imageHandle;
+
+  // Holds the VKFormat for the image
+  uint32_t imageFormat;
+
+  // Note: We could add the sample count, level count later if it makes sense
+
+  // VkSemaphore signaled when image is ready
+  void* imageReadySemaphore;
+
+} FlutterVulkanBackingStore;
+
 typedef enum {
   /// Indicates that the Flutter application requested that an opacity be
   /// applied to the platform view.
@@ -1048,6 +1108,8 @@ typedef enum {
   kFlutterBackingStoreTypeSoftware,
   /// Specifies a Metal backing store. This is backed by a Metal texture.
   kFlutterBackingStoreTypeMetal,
+  /// Specifies a Vulkan backing store. This is backed by a Vulkan image
+  kFlutterBackingStoreTypeVulkan,
 } FlutterBackingStoreType;
 
 typedef struct {
@@ -1069,6 +1131,8 @@ typedef struct {
     FlutterSoftwareBackingStore software;
     // The description of the Metal backing store.
     FlutterMetalBackingStore metal;
+    // The description of the Vulkan backing store.
+    FlutterVulkanBackingStore vulkan;
   };
 } FlutterBackingStore;
 

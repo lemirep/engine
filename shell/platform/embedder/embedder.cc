@@ -66,6 +66,10 @@ extern const intptr_t kPlatformStrongDillSize;
 #include "flutter/shell/platform/embedder/embedder_surface_metal.h"
 #endif
 
+#ifdef SHELL_ENABLE_VULKAN
+#include "flutter/shell/platform/embedder/embedder_surface_vulkan.h"
+#endif
+
 const int32_t kFlutterSemanticsNodeIdBatchEnd = -1;
 const int32_t kFlutterSemanticsCustomActionIdBatchEnd = -1;
 
@@ -164,6 +168,28 @@ static bool IsMetalRendererConfigValid(const FlutterRendererConfig* config) {
   return device && command_queue && present && get_texture;
 }
 
+static bool IsVulkanRendererConfigValue(const FlutterRendererConfig* config) {
+  if (config->type != kVulkan) {
+    return false;
+  }
+
+  const FlutterVulkanRendererConfig* vulkan_config = &config->vulkan;
+
+  const bool hasInstance = SAFE_ACCESS(vulkan_config, instance, NULL);
+  const bool hasPhysicalDevice =
+      SAFE_ACCESS(vulkan_config, physicalDevice, NULL);
+  const bool hasLogicalDevice = SAFE_ACCESS(vulkan_config, logicalDevice, NULL);
+  const bool hasGraphicsQueue = SAFE_ACCESS(vulkan_config, graphicsQueue, NULL);
+
+  const bool hasPresentCallback =
+      SAFE_ACCESS(vulkan_config, present_drawable_callback, nullptr);
+  const bool hasAcquireTextureCallback =
+      SAFE_ACCESS(vulkan_config, acquire_next_drawable_callback, nullptr);
+
+  return hasInstance && hasPhysicalDevice && hasLogicalDevice &&
+         hasGraphicsQueue && hasPresentCallback && hasAcquireTextureCallback;
+}
+
 static bool IsRendererValid(const FlutterRendererConfig* config) {
   if (config == nullptr) {
     return false;
@@ -176,6 +202,8 @@ static bool IsRendererValid(const FlutterRendererConfig* config) {
       return IsSoftwareRendererConfigValid(config);
     case kMetal:
       return IsMetalRendererConfigValid(config);
+    case kVulkan:
+      return IsVulkanRendererConfigValue(config);
     default:
       return false;
   }
@@ -426,6 +454,75 @@ InferSoftwarePlatformViewCreationCallback(
 }
 
 static flutter::Shell::CreateCallback<flutter::PlatformView>
+InferVulkanPlatformViewCreationCallback(
+    const FlutterRendererConfig* config,
+    void* user_data,
+    flutter::PlatformViewEmbedder::PlatformDispatchTable
+        platform_dispatch_table,
+    std::unique_ptr<flutter::EmbedderExternalViewEmbedder>
+        external_view_embedder) {
+  if (config->type != kVulkan) {
+    return nullptr;
+  }
+
+#ifdef SHELL_ENABLE_VULKAN
+  std::shared_ptr<flutter::EmbedderExternalViewEmbedder> view_embedder =
+      std::move(external_view_embedder);
+
+  auto acquireImageCallbackWrapper =
+      [ptr = config->vulkan.acquire_next_drawable_callback,
+       user_data](const SkISize& frame_size) {
+        FlutterFrameInfo frame_info = {};
+        frame_info.struct_size = sizeof(FlutterFrameInfo);
+        frame_info.size = {static_cast<uint32_t>(frame_size.width()),
+                           static_cast<uint32_t>(frame_size.height())};
+
+        flutter::GPUVulkanTextureInfo texture_info;
+
+        // Returns a new VkImage with the proper size based on frame_info
+        FlutterVulkanTexture vulkan_texture = ptr(user_data, &frame_info);
+        texture_info.handle = vulkan_texture.handle;
+
+        return texture_info;
+      };
+
+  std::function<bool(flutter::GPUVulkanTextureInfo)> submitCallbackWrapper =
+      [ptr = config->vulkan.present_drawable_callback,
+       user_data](flutter::GPUVulkanTextureInfo texture) {
+        FlutterVulkanTexture embedder_texture;
+        embedder_texture.struct_size = sizeof(FlutterVulkanTexture);
+        embedder_texture.handle = texture.handle;
+        // Calls present callback with the VkImage onto which Skia will have
+        // rendered into
+        return ptr(user_data, &embedder_texture);
+      };
+
+  flutter::EmbedderSurfaceVulkan::VulkanDispatchTable vulkan_dispatch_table = {
+      .present = submitCallbackWrapper,
+      .acquireImage = acquireImageCallbackWrapper,
+  };
+
+  std::unique_ptr<flutter::EmbedderSurfaceVulkan> embedder_surface =
+      std::make_unique<flutter::EmbedderSurfaceVulkan>(
+          config->vulkan, vulkan_dispatch_table, view_embedder);
+
+  return fml::MakeCopyable(
+      [embedder_surface = std::move(embedder_surface), platform_dispatch_table,
+       external_view_embedder = view_embedder](flutter::Shell& shell) mutable {
+        return std::make_unique<flutter::PlatformViewEmbedder>(
+            shell,                             // delegate
+            shell.GetTaskRunners(),            // task runners
+            std::move(embedder_surface),       // embedder surface
+            platform_dispatch_table,           // platform dispatch table
+            std::move(external_view_embedder)  // external view embedder
+        );
+      });
+#else
+  return nullptr;
+#endif
+}
+
+static flutter::Shell::CreateCallback<flutter::PlatformView>
 InferPlatformViewCreationCallback(
     const FlutterRendererConfig* config,
     void* user_data,
@@ -448,6 +545,10 @@ InferPlatformViewCreationCallback(
           std::move(external_view_embedder));
     case kMetal:
       return InferMetalPlatformViewCreationCallback(
+          config, user_data, platform_dispatch_table,
+          std::move(external_view_embedder));
+    case kVulkan:
+      return InferVulkanPlatformViewCreationCallback(
           config, user_data, platform_dispatch_table,
           std::move(external_view_embedder));
     default:
@@ -624,6 +725,43 @@ static sk_sp<SkSurface> MakeSkSurfaceFromBackingStore(
 #endif
 }
 
+static sk_sp<SkSurface> MakeSkSurfaceFromBackingStore(
+    GrDirectContext* context,
+    const FlutterBackingStoreConfig& config,
+    const FlutterVulkanBackingStore* vulkan) {
+#ifdef SHELL_ENABLE_VULKAN
+  GrVkImageInfo imageInfo;
+  imageInfo.fImage = (VkImage)vulkan->imageHandle;
+  imageInfo.fFormat = (VkFormat)vulkan->imageFormat;
+
+  GrBackendTexture backend_texture(config.size.width, config.size.height,
+                                   imageInfo);
+
+  SkSurfaceProps surface_properties(0, kUnknown_SkPixelGeometry);
+
+  auto surface = SkSurface::MakeFromBackendTexture(
+      context,                   // context
+      backend_texture,           // back-end texture
+      kTopLeft_GrSurfaceOrigin,  // surface origin
+      1,                         // sample count
+      kN32_SkColorType,          // color type RGBA8888
+      SkColorSpace::MakeSRGB(),  // color space
+      &surface_properties,       // surface properties
+      nullptr,                   // release proc
+      nullptr                    // release context
+  );
+
+  if (!surface) {
+    FML_LOG(ERROR) << "Could not wrap embedder supplied Vulkan render texture.";
+    return nullptr;
+  }
+
+  return surface;
+#else
+  return nullptr;
+#endif
+}
+
 static std::unique_ptr<flutter::EmbedderRenderTarget>
 CreateEmbedderRenderTarget(const FlutterCompositor* compositor,
                            const FlutterBackingStoreConfig& config,
@@ -684,6 +822,10 @@ CreateEmbedderRenderTarget(const FlutterCompositor* compositor,
     case kFlutterBackingStoreTypeMetal:
       render_surface =
           MakeSkSurfaceFromBackingStore(context, config, &backing_store.metal);
+      break;
+    case kFlutterBackingStoreTypeVulkan:
+      render_surface =
+          MakeSkSurfaceFromBackingStore(context, config, &backing_store.vulkan);
       break;
   };
 
@@ -1277,6 +1419,10 @@ FlutterEngineResult FlutterEngineInitialize(size_t version,
           external_texture_metal_callback);
     }
   }
+#endif
+#ifdef SHELL_ENABLE_VULKAN
+  // TO DO: Create EmbedderExternalTexture for Vulkan
+  // Shouldn't be needed if no compositor
 #endif
 
   auto thread_host =

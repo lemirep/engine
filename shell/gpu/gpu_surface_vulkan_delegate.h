@@ -10,6 +10,11 @@
 
 namespace flutter {
 
+struct GPUVulkanTextureInfo {
+  // Some kind of Vulkan Handle, to be determined
+  uintptr_t handle;
+};
+
 class GPUSurfaceVulkanDelegate {
  public:
   ~GPUSurfaceVulkanDelegate();
